@@ -12,6 +12,9 @@ use sp_core::hashing::blake2_256;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
+use subxt::backend::rpc::rpc_params;
+use serde_json::Value;
+use subxt::backend::rpc::RpcClient;
 
 use subxt::tx::TxStatus;
 #[subxt::subxt(runtime_metadata_path = "solochain_metadata.scale")]
@@ -52,7 +55,7 @@ pub fn summarize_us(mut xs: Vec<u128>) {
         xs[idx]
     };
     let sum: u128 = xs.iter().copied().sum();
-    let mean = if n == 0 { 0 } else { sum / n as u128 };
+    let mean = if n == 0 { 0.0 } else { sum as f64 / n as f64 };
 
     println!("n={} mean_us={} p50_us={} p95_us={} p99_us={}",
         n, mean, p(0.50), p(0.95), p(0.99)
@@ -200,4 +203,44 @@ pub fn print_crypto_sizes(
         dil_sig.public.len(),
         <AccountId32 as AsRef<[u8]>>::as_ref(dil_sender).len(),
     );
+}
+
+pub async fn account_nonce(
+    api: &OnlineClient<PolkadotConfig>,
+    account: &AccountId32,
+) -> Result<u32, Box<dyn std::error::Error>> {
+    let storage = api.storage().at_latest().await?;
+    let addr = polkadot_testnet::storage().system().account();
+
+    let account_info = storage.fetch(&addr, (account.clone(),)).await?;
+    let info = account_info.decode()?;
+
+    Ok(info.nonce)
+}
+
+pub async fn payment_query_info_ref_time(
+    rpc_client: &RpcClient,
+    extrinsic_bytes: &[u8],
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let hex_xt = format!("0x{}", hex::encode(extrinsic_bytes));
+
+    let v: Value = rpc_client
+        .request("payment_queryInfo", rpc_params![hex_xt, Value::Null])
+        .await?;
+
+    let w = v.get("weight").ok_or("payment_queryInfo: missing weight")?;
+    let rt = w
+        .get("refTime")
+        .or_else(|| w.get("ref_time"))
+        .ok_or("payment_queryInfo: missing refTime/ref_time")?;
+
+    let ref_time = if let Some(u) = rt.as_u64() {
+        u
+    } else if let Some(s) = rt.as_str() {
+        s.parse::<u64>()?
+    } else {
+        return Err("payment_queryInfo: ref_time not u64/string".into());
+    };
+
+    Ok(ref_time)
 }

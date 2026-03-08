@@ -12,6 +12,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 use subxt::tx::TxStatus;
+use subxt::backend::rpc::RpcClient;
 
 use crate::helpers::*;
 
@@ -35,9 +36,6 @@ where
 
     let mut csv = csv_open_append(experiment_file)?;
 
-    free_balance(api, "sender BEFORE", sender).await?;
-    free_balance(api, "dest   BEFORE", dest).await?;
-
     let tx = subxt::dynamic::tx(
         "Balances",
         "transfer_allow_death",
@@ -52,13 +50,13 @@ where
     for i in 0..n {
         println!("iter {}/{}", i + 1, n);
 
-        // True end-to-end starts BEFORE signing
+        // First timer => true end-to-end (includes signing)
         let t_all = Instant::now();
 
-        // Signing (not written separately, only contributes to all_*)
+        // Signing (contributes to all)
         let signed = api.tx().create_signed(&tx, signer, Default::default()).await?;
 
-        // submit -> included/finalized
+        // Second timer => submit -> included/finalized
         let t_submit = Instant::now();
         let mut progress = signed.submit_and_watch().await?;
 
@@ -93,6 +91,20 @@ where
                     let submit_us = t_submit.elapsed().as_micros() as u128;
                     let all_us = t_all.elapsed().as_micros() as u128;
 
+                    // if we never observed InBestBlock, treat finalized as "included" too
+                    if inc_us.is_none() {
+                        inc_us = Some(submit_us);
+                        all_inc_us = Some(all_us);
+
+                        included_samples.push(submit_us);
+                        all_included_samples.push(all_us);
+
+                        println!(
+                            "  (no InBestBlock seen) setting included_us={} all_included_us={} from finalized",
+                            submit_us, all_us
+                        );
+                    }
+
                     fin_us = Some(submit_us);
                     all_fin_us = Some(all_us);
 
@@ -115,7 +127,6 @@ where
             }
         }
 
-        // CSV: exactly the requested columns
         writeln!(
             csv,
             "{},{},{},{},{}",
@@ -126,22 +137,6 @@ where
             all_fin_us.unwrap_or(0),
         )?;
     }
-
-    println!("submit→included summary:");
-    summarize_us(included_samples);
-
-    println!("submit→finalized summary:");
-    summarize_us(finalized_samples);
-
-    println!("all→included (sign→included) summary:");
-    summarize_us(all_included_samples);
-
-    println!("all→finalized (sign→finalized) summary:");
-    summarize_us(all_finalized_samples);
-
-    free_balance(api, "sender AFTER ", sender).await?;
-    free_balance(api, "dest   AFTER ", dest).await?;
-
     Ok(())
 }
 
@@ -149,6 +144,7 @@ where
 pub async fn measure_signing_time<S>(
     api: &OnlineClient<PolkadotConfig>,
     signer: &S,
+    sender: &AccountId32,
     dest: &AccountId32,
     amount: u128,
     iters: usize,
@@ -159,7 +155,6 @@ where
     S: SubxtSigner<PolkadotConfig>,
 {
     println!("START signing experiment={}", label);
-
     let mut csv = csv_open_append_sign(experiment_file)?;
 
     let tx = subxt::dynamic::tx(
@@ -171,19 +166,32 @@ where
         ],
     );
 
-    /* ---------- cold ---------- */
+    // Fetch nonce once (reduces non-signing noise, and allows measuring signing in isolation)
+    let base_nonce: u64 = account_nonce(api, sender).await? as u64;
+
+    // Helper to build params with explicit nonce 
+    let params_with_nonce = |nonce: u64| {
+        subxt::config::DefaultExtrinsicParamsBuilder::<PolkadotConfig>::default()
+            .nonce(nonce)
+            .build()
+    };
+
+    // cold (usually first signing is slower due to caches, JIT, etc.)
     let t0 = Instant::now();
-    let signed = api.tx().create_signed(&tx, signer, Default::default()).await?;
-    std::hint::black_box(signed);
+    let signed = api.tx().create_signed(&tx, signer, params_with_nonce(base_nonce)).await?;
     println!("{}_sign_cold_us={}", label, t0.elapsed().as_micros());
 
-    /* ---------- warm ---------- */
+    // warm
     let mut samples: Vec<u128> = Vec::with_capacity(iters);
     let t0 = Instant::now();
 
     for i in 0..iters {
         let t_iter = Instant::now();
-        let signed = api.tx().create_signed(&tx, signer, Default::default()).await?;
+
+        let signed = api
+            .tx()
+            .create_signed(&tx, signer, params_with_nonce(base_nonce + i as u64 + 1))
+            .await?;
         std::hint::black_box(signed);
 
         let us = t_iter.elapsed().as_micros() as u128;
@@ -194,16 +202,6 @@ where
             println!("{} iter {}/{}", label, i + 1, iters);
         }
     }
-
-    println!(
-        "{}_sign_warm_total_us={}",
-        label,
-        t0.elapsed().as_micros()
-    );
-
-    println!("{}_sign summary:", label);
-    summarize_us(samples);
-
     Ok(())
 }
 
@@ -216,7 +214,7 @@ pub fn measure_keygen_seed_to_keypair<F>(
     mut gen: F,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    F: FnMut() -> Result<(), Box<dyn std::error::Error>>,
+    F: FnMut(usize) -> Result<(), Box<dyn std::error::Error>>,
 {
     println!("START keygen {} iters={} file={}", label, iters, file);
 
@@ -225,7 +223,7 @@ where
 
     for i in 0..iters {
         let t0 = Instant::now();
-        gen()?; // does black_box internally
+        gen(i)?; 
         let us = t0.elapsed().as_micros() as u128;
 
         samples.push(us);
@@ -235,8 +233,129 @@ where
             println!("{} iter {}/{}", label, i + 1, iters);
         }
     }
+    Ok(())
+}
 
-    println!("[{}] keygen summary:", label);
-    summarize_us(samples);
+
+pub async fn measure_extrinsic_size_and_weight<S>(
+    api: &OnlineClient<PolkadotConfig>,
+    rpc_client: &RpcClient,
+    signer: &S,
+    sender: &AccountId32,
+    dest: &AccountId32,
+    amount: u128,
+    label: &str,
+    iters: usize,
+    out_csv: &str,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: SubxtSigner<PolkadotConfig>,
+{
+    println!(
+        "START extrinsic size/weight experiment={} iters={} file={}",
+        label, iters, out_csv
+    );
+
+    let exists = Path::new(out_csv).exists();
+    let mut f = OpenOptions::new().create(true).append(true).open(out_csv)?;
+    if !exists {
+        writeln!(f, "iter,tx_type,xt_bytes,xt_ref_time")?;
+    }
+
+    let base_nonce = account_nonce(api, sender).await? as u64;
+
+    /* Balances::transfer_allow_death */
+    let tx = subxt::dynamic::tx(
+        "Balances",
+        "transfer_allow_death",
+        vec![
+            dest_multiaddress_id(dest),
+            subxt::dynamic::Value::u128(amount),
+        ],
+    );
+
+    for i in 0..iters {
+
+        let params = subxt::config::DefaultExtrinsicParamsBuilder::<PolkadotConfig>::default()
+            .nonce(base_nonce + i as u64)
+            .build();
+
+        let signed = api.tx().create_signed(&tx, signer, params).await?;
+        let encoded = signed.encoded();
+
+        let xt_bytes = encoded.len();
+        let xt_ref_time = payment_query_info_ref_time(rpc_client, &encoded).await?;
+
+        writeln!(f, "{},transfer_allow_death,{},{}", i, xt_bytes, xt_ref_time)?;
+
+        println!(
+            "[{}][transfer_allow_death] iter={} xt_bytes={} xt_ref_time={}",
+            label, i, xt_bytes, xt_ref_time
+        );
+    }
+
+    /* Balances::transfer_keep_alive */
+    /*
+    let tx = subxt::dynamic::tx(
+        "Balances",
+        "transfer_keep_alive",
+        vec![
+            dest_multiaddress_id(dest),
+            subxt::dynamic::Value::u128(amount),
+        ],
+    );
+
+    for i in 0..iters {
+
+        let params = subxt::config::DefaultExtrinsicParamsBuilder::<PolkadotConfig>::default()
+            .nonce(base_nonce + i as u64)
+            .build();
+
+        let signed = api.tx().create_signed(&tx, signer, params).await?;
+        let encoded = signed.encoded();
+
+        let xt_bytes = encoded.len();
+        let xt_ref_time = payment_query_info_ref_time(rpc_client, &encoded).await?;
+
+        writeln!(f, "{},transfer_keep_alive,{},{}", i, xt_bytes, xt_ref_time)?;
+
+        println!(
+            "[{}][transfer_keep_alive] iter={} xt_bytes={} xt_ref_time={}",
+            label, i, xt_bytes, xt_ref_time
+        );
+    }
+    */
+
+    /* TRANSACTION 3: System::remark */
+    /*
+    let tx = subxt::dynamic::tx(
+        "System",
+        "remark",
+        vec![
+            subxt::dynamic::Value::from_bytes(b"benchmark")
+        ],
+    );
+
+    for i in 0..iters {
+
+        let params = subxt::config::DefaultExtrinsicParamsBuilder::<PolkadotConfig>::default()
+            .nonce(base_nonce + i as u64)
+            .build();
+
+        let signed = api.tx().create_signed(&tx, signer, params).await?;
+        let encoded = signed.encoded();
+
+        let xt_bytes = encoded.len();
+        let xt_ref_time = payment_query_info_ref_time(rpc_client, &encoded).await?;
+
+        writeln!(f, "{},remark,{},{}", i, xt_bytes, xt_ref_time)?;
+
+        println!(
+            "[{}][remark] iter={} xt_bytes={} xt_ref_time={}",
+            label, i, xt_bytes, xt_ref_time
+        );
+    }
+    */
+
     Ok(())
 }
