@@ -1,6 +1,6 @@
-# Post-Quantum Signatures in Substrate – Benchmark Client
+# Subxt Dilithium Client
 
-This project evaluates the impact of **post-quantum signatures (CRYSTALS-Dilithium / ML-DSA)** on a **Substrate-based blockchain**.  
+This repository is part of a project aimed at evaluating the impact of **post-quantum signatures (CRYSTALS-Dilithium / ML-DSA)** on a **Substrate-based blockchain**.  
 It benchmarks Dilithium variants against commonly used blockchain signatures:
 
 - **sr25519**
@@ -81,11 +81,9 @@ To switch variants, update the Git dependencies used in the project via Cargo.to
 
 Change dependencies to:
 
-https://github.com/bsaviozz/polkadot-sdk.git
-branch = "dilithium-ml-dsa-44"
+https://github.com/bsaviozz/polkadot-sdk.git, branch = "dilithium-ml-dsa-44"
 
-https://github.com/bsaviozz/subxt
-branch = "dilithium-ml-dsa-44"
+https://github.com/bsaviozz/subxt, branch = "dilithium-ml-dsa-44"
 
 Also update labels in the benchmarking code to: "ml_dsa_44"
 
@@ -95,11 +93,9 @@ Also update labels in the benchmarking code to: "ml_dsa_44"
 
 Change dependencies to:
 
-https://github.com/bsaviozz/polkadot-sdk.git
-branch = "dilithium-ml-dsa-65"
+https://github.com/bsaviozz/polkadot-sdk.git, branch = "dilithium-ml-dsa-65"
 
-https://github.com/bsaviozz/subxt
-branch = "dilithium-ml-dsa-65"
+https://github.com/bsaviozz/subxt, branch = "dilithium-ml-dsa-65"
 
 Update labels in the benchmarking code to: "ml_dsa_65"
 
@@ -109,11 +105,9 @@ Update labels in the benchmarking code to: "ml_dsa_65"
 
 Change dependencies to:
 
-https://github.com/bsaviozz/polkadot-sdk.git
-branch = "dilithium"
+https://github.com/bsaviozz/polkadot-sdk.git, branch = "dilithium"
 
-https://github.com/bsaviozz/subxt
-branch = "master"
+https://github.com/bsaviozz/subxt, branch = "master"
 
 Update labels in the benchmarking code to: "ml_dsa_87"
 
